@@ -7,7 +7,10 @@
           {
             "Parameters": [
               "ResourceNamePrefix",
-              "KMSKeyARN"
+              "KMSKeyARN",
+              "CrossAccountRoleARN",
+              "ExternalID",
+              "ApiToken"
             ]
           }
         ],
@@ -16,14 +19,23 @@
             "default" : "Resource name prefix"
           },
           "KMSKeyARN" : {
-            "default" : "KMSKeyARN"
+            "default" : "KMS Key ARN"
+          },
+          "CrossAccountRoleARN" : {
+            "default" : "Cross-Account IAM Role ARN"
+          },
+          "ExternalID" : {
+            "default" : "External ID"
+          },
+          "ApiToken": {
+            "default": "API Token"
           }
         }
       }
     },
     "Parameters": {
       "ResourceNamePrefix": {
-        "Description": "Names of resources created by the stack will be prefixed with this value to ensure uniqueness.",
+        "Description": "[DO NOT CHANGE] Names of resources created by the stack will be prefixed with this value to ensure uniqueness.",
         "Type": "String",
         "Default": "lacework-vonage",
         "MinLength": "1",
@@ -32,11 +44,33 @@
         "ConstraintDescription": "Invalid resource name prefix value.  Must match pattern ^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$"
       },
       "KMSKeyARN": {
-        "Description": "KMS Key ARN that will be used to encrypt the cloudtrail resources.",
+        "Description": "[REQUIRED] KMS Key ARN that will be used to encrypt the cloudtrail resources. (Created in Step 1).",
         "Type": "String",
         "MinLength": "40",
         "AllowedPattern": "^arn:aws:kms:.*$",
+        "MaxLength": "1224"
+      },
+      "CrossAccountRoleARN": {
+        "Description": "[REQUIRED] Cross-account access role ARN to share with Lacework for CloudTrail integration. (Created in Step 1).",
+        "Type": "String",
+        "MinLength": "40",
+        "AllowedPattern": "^arn:aws:iam::.*$",
+        "MaxLength": "1224"
+      },
+      "ExternalID": {
+        "Description": "[REQUIRED] The external ID of the cross-account access role (Created in Step 1).",
+        "Type": "String",
+        "MinLength": "2",
         "MaxLength": "1224",
+        "AllowedPattern" : ".+",
+        "ConstraintDescription": "Invalid ExternalID value.  Must be at least 2 characters and no more than 1224.'"
+      },
+      "ApiToken": {
+        "Description": "[REQUIRED] The token required for making API requests with Lacework.",
+        "Type": "String",
+        "MinLength": "1",
+        "AllowedPattern" : ".+",
+        "ConstraintDescription": "A valid API Token is required"
       }
     },
     "Resources": {
@@ -260,7 +294,7 @@
           "KmsMasterKeyId": {
             "Ref": "KMSKeyARN"
           }
-        },
+        }
       },
       "LaceworkCWSQueuePolicy": {
         "Type": "AWS::SQS::QueuePolicy",
@@ -308,18 +342,31 @@
           }
         }
       },
+      "LaceworkSnsCustomResource": {
+        "Type": "Custom::LaceworkSnsCustomResource",
+        "DependsOn": [
+          "LaceworkCWSQueuePolicy",
+          "LaceworkCWSQueue"
+        ],
+        "Properties" : {
+          "Type": "AWS_CT_CFG",
+          "ServiceToken": { "Fn::Join": [ "", [ "arn:aws:sns:", { "Ref": "AWS::Region" }, ":434813966438:prodn-customer-cloudformation" ] ] },
+          "IntegrationName": {  "Ref": "AWS::StackName" },
+          "RoleArn": { "Ref": "CrossAccountRoleARN" },
+          "ExternalId": { "Ref": "ExternalID" },
+          "SqsQueueUrl": {  "Ref": "LaceworkCWSQueue" },
+          "ApiToken" : { "Ref": "ApiToken" },
+          "Account": "vonage",
+          "TemplateVersion": "1.1",
+          "AWSAccountId": {  "Ref": "AWS::AccountId" }
+        }
+      }
     },
     "Outputs": {
-      "SQSQueueURL": {
-        "Description": "SQS queue URL to share with Lacework for CloudTrail Integration",
-        "Value": {
-          "Ref": "LaceworkCWSQueue"
-        }
-      },
       "TemplateVersion": {
         "Description": "Template version",
         "Value": "1.1"
       }
     }
-  }
+}
   

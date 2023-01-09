@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lacework AWS CloudTrail and Config Security Audit Integration
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Parameters:
+          - ResourceNamePrefix
+    ParameterLabels:
+      ResourceNamePrefix:
+        default: Resource name prefix
+Parameters:
+  ResourceNamePrefix:
+    Description: >-
+      [DO NOT CHANGE] Names of resources created by the stack will be prefixed
+      with this value to ensure uniqueness.
+    Type: String
+    Default: lacework-vonage
+    MinLength: '1'
+    MaxLength: '45'
+    AllowedPattern: '^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$'
+    ConstraintDescription: >-
+      Invalid resource name prefix value.  Must match pattern
+      ^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$
+Resources:
+  LaceworkKmsKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: Lacework Kms Key
+      Enabled: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: Key policy created by CloudTrail
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Join 
+                  - ''
+                  - - 'arn:aws:iam::'
+                    - !Ref 'AWS::AccountId'
+                    - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow CloudTrail to encrypt logs
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: '*'
+          - Sid: Allow CloudTrail to describe key
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: 'kms:DescribeKey'
+            Resource: '*'
+          - Sid: Allow SNS service to encrypt/decrypt
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: '*'
+          - Sid: Enable cross account log decryption
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:ReEncryptFrom'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Ref 'AWS::AccountId'
+              StringLike:
+                'kms:EncryptionContext:aws:cloudtrail:arn':
+                  - !Join 
+                    - ''
+                    - - 'arn:aws:cloudtrail:*:'
+                      - !Ref 'AWS::AccountId'
+                      - ':trail/*'
+      MultiRegion: true
+  LaceworkLogs:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt 
+                - LaceworkKmsKey
+                - Arn
+      VersioningConfiguration:
+        Status: Enabled
+  LaceworkCWSBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join 
+        - ''
+        - - lacework-vonage-ct-
+          - !Ref 'AWS::AccountId'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt 
+                - LaceworkKmsKey
+                - Arn
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LaceworkLogs
+        LogFilePrefix: lacework-logging
+      VersioningConfiguration:
+        Status: Enabled
+  LaceworkCWSBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref LaceworkCWSBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Id: LaceworkCWSBucketPolicy
+        Statement:
+          - Sid: CloudTrailAclCheck
+            Action: 's3:GetBucketAcl'
+            Effect: Allow
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref LaceworkCWSBucket
+            Principal:
+              Service: cloudtrail.amazonaws.com
+          - Sid: CloudTrailWrite
+            Action: 's3:PutObject'
+            Effect: Allow
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref LaceworkCWSBucket
+                - /AWSLogs/
+                - !Ref 'AWS::AccountId'
+                - /*
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+              Bool:
+                'aws:SecureTransport': 'true'
+  LaceworkCWSTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Join 
+        - ''
+        - - !Ref ResourceNamePrefix
+          - '-laceworkcws'
+      KmsMasterKeyId: !GetAtt 
+        - LaceworkKmsKey
+        - Arn
+  LaceworkCWSTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: CloudTrailPublish
+            Action: 'SNS:Publish'
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Resource: '*'
+      Topics:
+        - !Ref LaceworkCWSTopic
+  LaceworkCWSTrail:
+    Type: 'AWS::CloudTrail::Trail'
+    DependsOn:
+      - LaceworkCWSTopicPolicy
+      - LaceworkCWSBucketPolicy
+    Properties:
+      TrailName: !Join 
+        - ''
+        - - !Ref ResourceNamePrefix
+          - '-laceworkcws'
+      S3BucketName: !Ref LaceworkCWSBucket
+      SnsTopicName: !GetAtt 
+        - LaceworkCWSTopic
+        - TopicName
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      IsLogging: true
+      KMSKeyId: !GetAtt 
+        - LaceworkKmsKey
+        - Arn
+  LaceworkCWSQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: !Join 
+        - ''
+        - - !Ref ResourceNamePrefix
+          - '-laceworkcws'
+      KmsMasterKeyId: !GetAtt 
+        - LaceworkKmsKey
+        - Arn
+  LaceworkCWSQueuePolicy:
+    Type: 'AWS::SQS::QueuePolicy'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AwsSnsAccess
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - 'sqs:SendMessage'
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                'aws:SourceArn': !Ref LaceworkCWSTopic
+      Queues:
+        - !Ref LaceworkCWSQueue
+  LaceworkCWSSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      Endpoint: !GetAtt 
+        - LaceworkCWSQueue
+        - Arn
+      Protocol: sqs
+      TopicArn: !Ref LaceworkCWSTopic
+Outputs:
+  TemplateVersion:
+    Description: Template version
+    Value: '1.1'
+  KMSKeyARN:
+    Description: KMS Key ARN that is being used to encrypt the cloudtrail resources
+    Value: !GetAtt 
+      - LaceworkKmsKey
+      - Arn
+  SQSQueueURL:
+    Description: SQS Queue URL for the cloudtrail stack
+    Value: !Ref LaceworkCWSQueue
